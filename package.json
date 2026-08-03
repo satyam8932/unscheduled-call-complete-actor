@@ -1,0 +1,29 @@
+{
+	"name": "unscheduled-call-complete-actor",
+	"version": "0.0.1",
+	"type": "module",
+	"description": "Apify actor to mark unscheduled calls as complete in GoHighLevel via browser automation.",
+	"engines": {
+		"node": ">=18.0.0"
+	},
+	"dependencies": {
+		"apify": "^3.7.0",
+		"playwright": "^1.52.0"
+	},
+	"devDependencies": {
+		"@apify/tsconfig": "^0.2.0",
+		"@types/node": "^24.0.0",
+		"tsx": "^4.20.3",
+		"typescript": "^6.0.0"
+	},
+	"scripts": {
+		"start": "npm run start:dev",
+		"start:prod": "node dist/main.js",
+		"start:dev": "tsx src/main.ts",
+		"export-cookies": "tsx src/export-cookies.ts",
+		"build": "tsc",
+		"test": "tsx src/main.ts"
+	},
+	"author": "It's not you it's me",
+	"license": "ISC"
+}
