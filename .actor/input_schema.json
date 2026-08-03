@@ -28,6 +28,13 @@
             "description": "Set to true to open browser for manual login. Saves session for future runs.",
             "editor": "checkbox",
             "default": false
+        },
+        "screenshotOnly": {
+            "title": "Screenshot Only",
+            "type": "boolean",
+            "description": "When true, skips call recording search. Opens lead conversation and captures a screenshot only. Returns { screenshotUrl, format, sizeBytes }.",
+            "editor": "checkbox",
+            "default": false
         }
     },
     "required": ["subAccountUrl", "leadName"]

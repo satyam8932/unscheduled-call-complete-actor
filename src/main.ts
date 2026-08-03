@@ -8,6 +8,7 @@ interface ActorInput {
     leadName: string;
     storageState?: any;
     loginMode?: boolean;
+    screenshotOnly?: boolean;
 }
 
 interface CallInfo {
@@ -279,6 +280,16 @@ async function findCallCompleted(page: Page): Promise<CallInfo> {
         return { callFound: false, duration: null, durationSeconds: 0, meetsThreshold: false, screenshotUrl: null };
     }
 
+    // Close activity panel for more conversation space
+    try {
+        const closeBtn = page.locator('#close-panel-button, #close-pannel-button');
+        if (await closeBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+            await closeBtn.click();
+            log.info('Activity panel closed.');
+            await page.waitForTimeout(500);
+        }
+    } catch { /* panel may not exist */ }
+
     let callCount = await page.getByText('Call completed', { exact: false }).count();
     log.info(`"Call completed" in DOM: ${callCount}`);
 
@@ -414,16 +425,21 @@ try {
 
     if (loginDetected || page.url().includes('/login') || page.url().includes('/oauth')) {
         log.warning('Session expired — login page detected.');
-        await Actor.pushData({
-            leadFound: false,
-            leadName: input.leadName,
-            callFound: false,
-            duration: null,
-            durationSeconds: 0,
-            meetsThreshold: false,
-            screenshotUrl: null,
-            error: 'LOGIN_REQUIRED: Cookies expired. Run locally with loginMode=true to refresh storage-state.json',
-        });
+        const loginError = 'LOGIN_REQUIRED: Cookies expired. Run locally with loginMode=true to refresh storage-state.json';
+        if (input.screenshotOnly) {
+            await Actor.pushData({ screenshotUrl: null, format: 'jpeg', sizeBytes: 0, error: loginError });
+        } else {
+            await Actor.pushData({
+                leadFound: false,
+                leadName: input.leadName,
+                callFound: false,
+                duration: null,
+                durationSeconds: 0,
+                meetsThreshold: false,
+                screenshotUrl: null,
+                error: loginError,
+            });
+        }
         await context.close();
         await Actor.exit();
     }
@@ -449,8 +465,55 @@ try {
     };
 
     if (!leadFound) {
-        output.error = `Lead "${input.leadName}" not found in search.`;
-        log.info(output.error);
+        if (input.screenshotOnly) {
+            await Actor.pushData({ screenshotUrl: null, format: 'jpeg', sizeBytes: 0, error: `Lead "${input.leadName}" not found in search.` });
+        } else {
+            output.error = `Lead "${input.leadName}" not found in search.`;
+            log.info(output.error);
+            await Actor.pushData(output);
+        }
+    } else if (input.screenshotOnly) {
+        log.info('Screenshot-only mode: capturing conversation...');
+
+        const panelSelectors = ['.conversation-panel', '[class*="conversation-panel"]', '.chat-content', '[class*="chat-content"]', '.conversation-body', '[class*="conversation"]'];
+        const maxWait = Actor.isAtHome() ? 60000 : 15000;
+        const deadline = Date.now() + maxWait;
+        while (Date.now() < deadline) {
+            let found = false;
+            for (const sel of panelSelectors) {
+                if (await page.locator(sel).count() > 0) { found = true; break; }
+            }
+            if (found) break;
+            await page.waitForTimeout(1000);
+        }
+
+        // Close activity panel after page has loaded
+        try {
+            const closeBtn = page.locator('#close-panel-button, #close-pannel-button');
+            if (await closeBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+                await closeBtn.click();
+                log.info('Activity panel closed.');
+                await page.waitForTimeout(500);
+            }
+        } catch { /* panel may not exist */ }
+
+        // Extra wait for conversation messages to render
+        await page.waitForTimeout(5000);
+
+        let screenshotUrl: string | null = null;
+        let sizeBytes = 0;
+        try {
+            const screenshot = await page.screenshot({ type: 'jpeg', quality: 75, timeout: 30000 });
+            sizeBytes = screenshot.length;
+            const store = await Actor.openKeyValueStore();
+            await store.setValue('conversation-screenshot', screenshot, { contentType: 'image/jpeg' });
+            screenshotUrl = `https://api.apify.com/v2/key-value-stores/${store.id}/records/conversation-screenshot`;
+            log.info(`Screenshot saved: ${screenshotUrl} (${sizeBytes} bytes)`);
+        } catch (err: any) {
+            log.warning(`Screenshot failed: ${err.message}`);
+        }
+
+        await Actor.pushData({ screenshotUrl, format: 'jpeg', sizeBytes, error: screenshotUrl ? null : 'Screenshot capture failed' });
     } else {
         log.info('Phase 1 complete: Lead found and opened.');
 
@@ -467,9 +530,8 @@ try {
         } else {
             log.info(`Result — duration: ${output.duration}, meets threshold: ${output.meetsThreshold}`);
         }
+        await Actor.pushData(output);
     }
-
-    await Actor.pushData(output);
 } finally {
     await context.close();
 }
