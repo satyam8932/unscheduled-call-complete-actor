@@ -144,8 +144,11 @@ async function runLoginMode(): Promise<void> {
     const page = await context.newPage();
     await page.goto('https://app.tjbdigitalservices.com/');
 
-    log.info('Waiting for login... navigate to dashboard to save session.');
-    await page.waitForURL('**/v2/location/**', { timeout: 300000 });
+    log.info('Waiting for login... will save session once you reach any dashboard.');
+    await page.waitForURL(url => {
+        const path = new URL(url).pathname;
+        return path.includes('/dashboard') || path.includes('/v2/location') || path.includes('/agency_dashboard');
+    }, { timeout: 300000 });
 
     const state = await context.storageState();
     writeFileSync(LOCAL_STORAGE_STATE, JSON.stringify(state, null, 2));
