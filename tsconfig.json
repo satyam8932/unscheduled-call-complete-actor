@@ -4,6 +4,7 @@
         "module": "NodeNext",
         "moduleResolution": "NodeNext",
         "target": "ES2022",
+        "lib": ["ES2023", "DOM"],
         "outDir": "dist",
         "rootDir": "src",
         "skipLibCheck": true,
