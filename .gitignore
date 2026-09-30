@@ -3,3 +3,4 @@ dist/
 storage/
 storage-state.json
 apify_storage/
+tsconfig.tsbuildinfo

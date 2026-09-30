@@ -1,6 +1,8 @@
 node_modules
 dist
+storage
+apify_storage
 storage-state.json
+tsconfig.tsbuildinfo
 debug-*.png
-lead-page.png
 .git

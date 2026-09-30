@@ -4,7 +4,7 @@ Automates verifying unscheduled call completion in GoHighLevel. Searches for a l
 
 ## Actor IDs
 
-- **Actor ID:** `EAEATOookeiuIM2Zf`
+- **Actor ID:** `AN7gXZSQMj4qkfqtt`
 - **Platform:** Apify Cloud
 
 ## Setup
@@ -37,6 +37,9 @@ After login, the script auto-saves once you reach `/dashboard`, `/agency_dashboa
 echo '{"subAccountUrl": "https://app.tjbdigitalservices.com/v2/location/LOCATION_ID/dashboard", "leadName": "Lead Name"}' > storage/key_value_stores/default/INPUT.json
 
 npx tsx src/main.ts
+
+# Or watch the browser while it runs
+HEADLESS=false npx tsx src/main.ts
 ```
 
 ## Run on Cloud (API call)
