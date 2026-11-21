@@ -1,4 +1,4 @@
-FROM apify/actor-node-playwright-chrome:24 AS builder
+FROM apify/actor-node-playwright-chrome:24-1.63.0 AS builder
 
 COPY --chown=myuser:myuser package*.json ./
 
@@ -8,7 +8,7 @@ COPY --chown=myuser:myuser . ./
 
 RUN npm run build
 
-FROM apify/actor-node-playwright-chrome:24
+FROM apify/actor-node-playwright-chrome:24-1.63.0
 
 COPY --chown=myuser:myuser package*.json ./
 
