@@ -9,6 +9,7 @@ interface ActorInput {
     storageState?: any;
     loginMode?: boolean;
     screenshotOnly?: boolean;
+    alwaysScreenshot?: boolean;
 }
 
 interface CallInfo {
@@ -683,7 +684,7 @@ async function closeActivityPanel(page: Page): Promise<void> {
     await conversationScroll(page, 'measure');
 }
 
-async function findCallCompleted(page: Page): Promise<CallInfo> {
+async function findCallCompleted(page: Page, alwaysScreenshot = false): Promise<CallInfo> {
     log.info('Waiting for conversation to load...');
 
     const { present, container } = await waitForConversation(page, Actor.isAtHome() ? 60000 : 15000);
@@ -783,8 +784,12 @@ async function findCallCompleted(page: Page): Promise<CallInfo> {
     log.info(`Duration: ${duration || 'unknown'}, meets 5:00 threshold: ${meetsThreshold}`);
 
     let screenshotUrl: string | null = null;
-    if (meetsThreshold) {
-        log.info('Call meets threshold — taking screenshot...');
+    if (meetsThreshold || alwaysScreenshot) {
+        log.info(
+            meetsThreshold
+                ? 'Call meets threshold, taking screenshot...'
+                : 'alwaysScreenshot is on, taking screenshot of a call under the threshold...',
+        );
         for (let attempt = 0; attempt < 3; attempt++) {
             try {
                 if (attempt > 0) await page.waitForTimeout(2000);
@@ -989,7 +994,7 @@ try {
     } else {
         log.info('Phase 1 complete: Lead found and opened.');
 
-        const callResult = await findCallCompleted(page);
+        const callResult = await findCallCompleted(page, input.alwaysScreenshot === true);
         output.callFound = callResult.callFound;
         output.duration = callResult.duration;
         output.durationSeconds = callResult.durationSeconds;

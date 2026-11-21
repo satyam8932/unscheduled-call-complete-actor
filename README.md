@@ -70,6 +70,7 @@ apify builds add-tag -b BUILD_ID -t latest
 | storageState | object | cloud only | Browser session JSON |
 | loginMode | boolean | no | Opens browser for manual login |
 | screenshotOnly | boolean | no | Skip call search, just screenshot conversation |
+| alwaysScreenshot | boolean | no | Full mode only: take the call screenshot even if the call is under the 5:00 threshold (duration and meetsThreshold still reported as normal) |
 
 ## Output
 

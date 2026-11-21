@@ -35,6 +35,13 @@
             "description": "When true, skips call recording search. Opens lead conversation and captures a screenshot only. Returns { screenshotUrl, format, sizeBytes }.",
             "editor": "checkbox",
             "default": false
+        },
+        "alwaysScreenshot": {
+            "title": "Always screenshot the call",
+            "type": "boolean",
+            "description": "Full mode only. When true, the call screenshot is taken even if the call is under the 5:00 threshold. Duration and meetsThreshold are still reported as normal.",
+            "default": false,
+            "editor": "checkbox"
         }
     },
     "required": ["subAccountUrl", "leadName"]
