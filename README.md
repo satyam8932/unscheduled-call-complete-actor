@@ -87,6 +87,17 @@ apify builds add-tag -b BUILD_ID -t latest
 }
 ```
 
+### When GHL won't load (fallback)
+
+The actor never crashes. Each run always pushes exactly one dataset item and exits with code 0, so Apify does not restart it.
+
+- If anything fails, the whole page is reloaded (`page.goto(subAccountUrl)`) and the full process runs once more from the start.
+- The retry is skipped if more than 230s have passed (the n8n workflow stops waiting at 330s).
+- If the last attempt also fails, the actor saves a screenshot of whatever the page shows under the key `page-fallback` and returns it as `screenshotUrl`, with `leadFound: false`, the call fields cleared, and `pageUrl` set to the page's URL. The `error` is either:
+  - `DASHBOARD_NOT_LOADED: ...` when the GHL dashboard never loaded, or
+  - `ACTOR_ERROR: <original message>` when the dashboard loaded but something later broke (search, scroll, screenshot).
+- `LOGIN_REQUIRED` and "lead not found" are normal results and are not retried.
+
 ## Config
 
 - **RAM:** 2048MB

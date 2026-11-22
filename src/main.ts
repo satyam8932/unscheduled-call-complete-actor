@@ -29,6 +29,16 @@ interface ActorOutput {
     meetsThreshold: boolean;
     screenshotUrl: string | null;
     error: string | null;
+    // Only set on the fallback result: the page URL the fallback picture shows.
+    pageUrl?: string;
+}
+
+interface ScreenshotOnlyOutput {
+    screenshotUrl: string | null;
+    format: 'jpeg';
+    sizeBytes: number;
+    error: string | null;
+    pageUrl?: string;
 }
 
 const LOCAL_STORAGE_STATE = resolve(process.cwd(), 'storage-state.json');
@@ -819,35 +829,68 @@ async function findCallCompleted(page: Page, alwaysScreenshot = false): Promise<
 }
 
 // --- Main execution ---
-await Actor.init();
 
-const input = await Actor.getInput<ActorInput>();
+// The n8n workflow stops waiting at 330s. Past this point a second full attempt
+// would not finish in time, so go straight to the fallback picture instead.
+const RETRY_DEADLINE_MS = 230000;
+const MAX_ATTEMPTS = 2;
+const DASHBOARD_NOT_LOADED_ERROR =
+    'DASHBOARD_NOT_LOADED: the GHL dashboard did not load after a full page reload, so this is a picture of what the page showed instead.';
 
-if (input?.loginMode) {
-    await runLoginMode();
-    await Actor.exit();
+type RunResult = ActorOutput | ScreenshotOnlyOutput;
+
+interface AttemptProgress {
+    dashboardLoaded: boolean;
 }
 
-if (!input?.subAccountUrl || !input?.leadName) {
-    throw new Error('Input must contain "subAccountUrl" and "leadName"');
+const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
+function safePageUrl(page: Page | null): string | null {
+    try {
+        return page ? page.url() : null;
+    } catch {
+        return null;
+    }
 }
 
-log.info('Starting Unscheduled Call Complete automation', {
-    url: input.subAccountUrl,
-    leadName: input.leadName,
-});
+// Chrome on a fresh Apify container sometimes sees the network change during
+// the first page load: goto fails with net::ERR_NETWORK_CHANGED, then Chrome's
+// own error page auto-reloads and interrupts the next goto. That is a short
+// blip, not GHL failing, so retry the load a few times before giving up.
+const TRANSIENT_NAV_ERROR = /net::ERR_NETWORK_CHANGED|interrupted by another navigation/;
 
-const { context, persistent } = await getContext(input);
-// Local dev runs through tsx, which wraps named functions in a __name() helper.
-// Code passed to page.evaluate() carries those calls into the browser, where the
-// helper is missing, so provide a no-op there.
-await context.addInitScript('globalThis.__name = globalThis.__name || ((fn) => fn);');
+async function loadSubAccount(page: Page, url: string): Promise<void> {
+    const maxTries = 3;
+    for (let tryNo = 1; ; tryNo++) {
+        try {
+            await page.goto(url, { waitUntil: 'load', timeout: 120000 });
+            return;
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            if (!TRANSIENT_NAV_ERROR.test(message) || tryNo >= maxTries) throw err;
+            log.warning(`Page load hit a network blip (${message.split('\n')[0]}). Retrying in 3s (${tryNo}/${maxTries - 1})...`);
+            await page.waitForTimeout(3000).catch(() => {
+                /* page may be mid-navigation */
+            });
+        }
+    }
+}
 
-try {
-    const page = persistent ? context.pages()[0] || (await context.newPage()) : await context.newPage();
-
-    log.info('Navigating to sub-account...');
-    await page.goto(input.subAccountUrl, { waitUntil: 'load', timeout: 120000 });
+// One full pass: load the sub-account, check auth, wait for the dashboard, find
+// the lead, then the call and its screenshot. Returns the output instead of
+// pushing it. Throws when something breaks, so the caller can reload and retry.
+async function runAttempt(
+    page: Page,
+    input: ActorInput,
+    attemptNo: number,
+    progress: AttemptProgress,
+): Promise<RunResult> {
+    log.info(
+        attemptNo === 1
+            ? 'Navigating to sub-account...'
+            : `Attempt ${attemptNo}: reloading the sub-account page from scratch...`,
+    );
+    await loadSubAccount(page, input.subAccountUrl);
 
     // Detect login/logout vs. dashboard by polling both outcomes instead of a
     // single 5s check followed by a blind 90s x 2 dashboard wait. GHL's dead-
@@ -894,37 +937,38 @@ try {
         const loginError =
             'LOGIN_REQUIRED: Cookies expired. Run locally with loginMode=true to refresh storage-state.json';
         if (input.screenshotOnly) {
-            await Actor.pushData({ screenshotUrl: null, format: 'jpeg', sizeBytes: 0, error: loginError });
-        } else {
-            await Actor.pushData({
-                leadFound: false,
-                leadName: input.leadName,
-                callFound: false,
-                duration: null,
-                durationSeconds: 0,
-                meetsThreshold: false,
-                screenshotUrl: null,
-                error: loginError,
-            });
+            return { screenshotUrl: null, format: 'jpeg', sizeBytes: 0, error: loginError };
         }
-        await context.close();
-        await Actor.exit();
+        return {
+            leadFound: false,
+            leadName: input.leadName,
+            callFound: false,
+            duration: null,
+            durationSeconds: 0,
+            meetsThreshold: false,
+            screenshotUrl: null,
+            error: loginError,
+        };
     }
 
     if (authState === 'dashboard') {
         log.info('Dashboard loaded.');
     } else {
-        // Genuinely ambiguous after 20s of polling — fall back to the longer
-        // retried wait as a safety net rather than guessing either way.
-        log.info('Auth state unclear after 20s — falling back to dashboard wait/retry.');
-        await retry(
-            async () => {
-                await page.waitForSelector(dashboardSelector, { state: 'visible', timeout: 90000 });
-            },
-            { attempts: 2, delayMs: 5000, label: 'wait for dashboard' },
-        );
+        // Genuinely ambiguous after 20s of polling — give the dashboard one more
+        // bounded wait. If it still isn't there, the caller reloads the page.
+        log.info('Auth state unclear after 20s — waiting up to 45s more for the dashboard.');
+        const visible = await page
+            .waitForSelector(dashboardSelector, { state: 'visible', timeout: 45000 })
+            .then(
+                () => true,
+                () => false,
+            );
+        if (!visible) {
+            throw new Error(`DASHBOARD_NOT_LOADED: ${dashboardSelector} was not visible after 65s (url: ${page.url()})`);
+        }
         log.info('Dashboard loaded.');
     }
+    progress.dashboardLoaded = true;
 
     const leadFound = await searchAndClickLead(page, input.leadName);
 
@@ -941,18 +985,19 @@ try {
 
     if (!leadFound) {
         if (input.screenshotOnly) {
-            await Actor.pushData({
+            return {
                 screenshotUrl: null,
                 format: 'jpeg',
                 sizeBytes: 0,
                 error: `Lead "${input.leadName}" not found in search.`,
-            });
-        } else {
-            output.error = `Lead "${input.leadName}" not found in search.`;
-            log.info(output.error);
-            await Actor.pushData(output);
+            };
         }
-    } else if (input.screenshotOnly) {
+        output.error = `Lead "${input.leadName}" not found in search.`;
+        log.info(output.error);
+        return output;
+    }
+
+    if (input.screenshotOnly) {
         log.info('Screenshot-only mode: capturing conversation...');
 
         const { present, container } = await waitForConversation(page, Actor.isAtHome() ? 60000 : 15000);
@@ -985,32 +1030,172 @@ try {
             log.warning(`Screenshot failed: ${err.message}`);
         }
 
-        await Actor.pushData({
+        return {
             screenshotUrl,
             format: 'jpeg',
             sizeBytes,
             error: screenshotUrl ? null : 'Screenshot capture failed',
-        });
-    } else {
-        log.info('Phase 1 complete: Lead found and opened.');
-
-        const callResult = await findCallCompleted(page, input.alwaysScreenshot === true);
-        output.callFound = callResult.callFound;
-        output.duration = callResult.duration;
-        output.durationSeconds = callResult.durationSeconds;
-        output.meetsThreshold = callResult.meetsThreshold;
-        output.screenshotUrl = callResult.screenshotUrl;
-
-        if (!callResult.callFound) {
-            output.error = 'No "Call completed" entry found for this lead.';
-            log.info(output.error);
-        } else {
-            log.info(`Result — duration: ${output.duration}, meets threshold: ${output.meetsThreshold}`);
-        }
-        await Actor.pushData(output);
+        };
     }
+
+    log.info('Phase 1 complete: Lead found and opened.');
+
+    const callResult = await findCallCompleted(page, input.alwaysScreenshot === true);
+    output.callFound = callResult.callFound;
+    output.duration = callResult.duration;
+    output.durationSeconds = callResult.durationSeconds;
+    output.meetsThreshold = callResult.meetsThreshold;
+    output.screenshotUrl = callResult.screenshotUrl;
+
+    if (!callResult.callFound) {
+        output.error = 'No "Call completed" entry found for this lead.';
+        log.info(output.error);
+    } else {
+        log.info(`Result — duration: ${output.duration}, meets threshold: ${output.meetsThreshold}`);
+    }
+    return output;
+}
+
+// Picture of whatever the page shows right now. Never throws.
+async function captureFallbackScreenshot(page: Page | null): Promise<{ url: string | null; sizeBytes: number }> {
+    try {
+        if (!page || page.isClosed()) {
+            log.warning('No open page to capture for the fallback picture.');
+            return { url: null, sizeBytes: 0 };
+        }
+        const screenshot = await page.screenshot({ type: 'jpeg', quality: 75, timeout: 30000 });
+        const store = await Actor.openKeyValueStore();
+        await store.setValue('page-fallback', screenshot, { contentType: 'image/jpeg' });
+        const url = `https://api.apify.com/v2/key-value-stores/${store.id}/records/page-fallback`;
+        log.info(`Fallback screenshot saved: ${url}`);
+        return { url, sizeBytes: screenshot.length };
+    } catch (err) {
+        log.warning(`Fallback screenshot failed: ${errorMessage(err)}`);
+        return { url: null, sizeBytes: 0 };
+    }
+}
+
+// Result for a run that could not finish normally: same output shape, with a
+// picture of the page instead of the call screenshot. Never throws.
+async function buildFallbackResult(page: Page | null, input: ActorInput | null, error: string): Promise<RunResult> {
+    const shot = await captureFallbackScreenshot(page);
+    const pageUrl = safePageUrl(page) ?? undefined;
+    if (input?.screenshotOnly) {
+        return { screenshotUrl: shot.url, format: 'jpeg', sizeBytes: shot.sizeBytes, pageUrl, error };
+    }
+    return {
+        leadFound: false,
+        leadName: input?.leadName ?? '',
+        callFound: false,
+        duration: null,
+        durationSeconds: 0,
+        meetsThreshold: false,
+        screenshotUrl: shot.url,
+        pageUrl,
+        error,
+    };
+}
+
+await Actor.init();
+const runStartedAt = Date.now();
+
+const input = await Actor.getInput<ActorInput>();
+
+if (input?.loginMode) {
+    await runLoginMode();
+    await Actor.exit();
+}
+
+let context: BrowserContext | null = null;
+let page: Page | null = null;
+let result: RunResult | null = null;
+
+// Nothing may escape this block: Apify restarts runs that exit non-zero, and
+// the n8n workflow then only sees "crashed". Always push exactly one dataset
+// item, always close the browser, always exit 0.
+try {
+    if (!input?.subAccountUrl || !input?.leadName) {
+        throw new Error('Input must contain "subAccountUrl" and "leadName"');
+    }
+
+    log.info('Starting Unscheduled Call Complete automation', {
+        url: input.subAccountUrl,
+        leadName: input.leadName,
+    });
+
+    const browser = await getContext(input);
+    context = browser.context;
+    // Local dev runs through tsx, which wraps named functions in a __name() helper.
+    // Code passed to page.evaluate() carries those calls into the browser, where the
+    // helper is missing, so provide a no-op there.
+    await context.addInitScript('globalThis.__name = globalThis.__name || ((fn) => fn);');
+
+    page = browser.persistent ? context.pages()[0] || (await context.newPage()) : await context.newPage();
+
+    let lastError: unknown = null;
+    let dashboardLoaded = false;
+
+    for (let attemptNo = 1; attemptNo <= MAX_ATTEMPTS; attemptNo++) {
+        if (attemptNo > 1) {
+            const elapsedSecs = Math.round((Date.now() - runStartedAt) / 1000);
+            if (Date.now() - runStartedAt > RETRY_DEADLINE_MS) {
+                log.warning(
+                    `${elapsedSecs}s elapsed (limit ${RETRY_DEADLINE_MS / 1000}s): skipping attempt ${attemptNo} and returning a picture of the page instead.`,
+                );
+                break;
+            }
+            if (page.isClosed()) page = await context.newPage();
+            // Give the network and any Chrome error page a moment to settle.
+            await page.waitForTimeout(3000).catch(() => {
+                /* page may be mid-navigation */
+            });
+        }
+
+        const progress: AttemptProgress = { dashboardLoaded: false };
+        try {
+            result = await runAttempt(page, input, attemptNo, progress);
+            break;
+        } catch (err) {
+            lastError = err;
+            dashboardLoaded = progress.dashboardLoaded;
+            const pageTitle = await page.title().catch(() => '(unavailable)');
+            log.error(`Attempt ${attemptNo}/${MAX_ATTEMPTS} failed: ${errorMessage(err)}`, {
+                pageUrl: safePageUrl(page),
+                pageTitle,
+            });
+        }
+    }
+
+    if (!result) {
+        result = await buildFallbackResult(
+            page,
+            input,
+            dashboardLoaded ? `ACTOR_ERROR: ${errorMessage(lastError)}` : DASHBOARD_NOT_LOADED_ERROR,
+        );
+    }
+} catch (err) {
+    // Setup failed (bad input, no browser or session) or something escaped above.
+    log.error(`Run failed: ${errorMessage(err)}`);
+    result = await buildFallbackResult(page, input ?? null, `ACTOR_ERROR: ${errorMessage(err)}`);
 } finally {
-    await context.close();
+    try {
+        await Actor.pushData(
+            result ??
+                ({
+                    leadFound: false,
+                    leadName: input?.leadName ?? '',
+                    callFound: false,
+                    duration: null,
+                    durationSeconds: 0,
+                    meetsThreshold: false,
+                    screenshotUrl: null,
+                    error: 'ACTOR_ERROR: run ended without a result',
+                } satisfies ActorOutput),
+        );
+    } catch (err) {
+        log.error(`Could not push the result to the dataset: ${errorMessage(err)}`);
+    }
+    await context?.close().catch((err: unknown) => log.warning(`Closing the browser failed: ${errorMessage(err)}`));
 }
 
 await Actor.exit();
